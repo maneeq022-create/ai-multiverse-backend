@@ -1,0 +1,76 @@
+const express = require('express');
+const mongoose = require('mongoose');
+const cors = require('cors');
+const jwt = require('jsonwebtoken');
+const bcrypt = require('bcryptjs');
+require('dotenv').config();
+
+const app = express();
+app.use(express.json());
+app.use(cors());
+
+mongoose.connect(process.env.MONGO_URI)
+  .then(() => console.log('Connected to MongoDB'))
+  .catch(err => console.error('MongoDB error:', err));
+
+const userSchema = new mongoose.Schema({
+  name: String,
+  email: { type: String, unique: true },
+  password: String,
+  credits: { type: Number, default: 1000 },
+  plan_type: { type: String, default: 'free' },
+  referral_code: { type: String, unique: true },
+  referred_by: String,
+  referral_count: { type: Number, default: 0 },
+  is_banned: { type: Boolean, default: false }
+});
+const User = mongoose.model('User', userSchema);
+
+app.post('/api/register', async (req, res) => {
+  try {
+    const { name, email, password } = req.body;
+    const hashedPassword = await bcrypt.hash(password, 10);
+    const refCode = 'REF-' + Math.random().toString(36).substr(2, 6).toUpperCase();
+    const user = new User({ name, email, password: hashedPassword, referral_code: refCode });
+    await user.save();
+    res.json({ success: true, message: "Account created!" });
+  } catch (err) { res.status(400).json({ success: false, message: "Email already exists." }); }
+});
+
+app.post('/api/login', async (req, res) => {
+  const { email, password } = req.body;
+  const user = await User.findOne({ email });
+  if (!user || user.is_banned) return res.status(400).json({ success: false, message: "Invalid/Banned" });
+  const validPass = await bcrypt.compare(password, user.password);
+  if (!validPass) return res.status(400).json({ success: false, message: "Invalid credentials" });
+  const token = jwt.sign({ id: user._id }, process.env.JWT_SECRET);
+  res.json({ success: true, token, user: { ...user._doc, password: '' } });
+});
+
+app.get('/api/me', async (req, res) => {
+  const token = req.headers.authorization?.split(' ')[1];
+  if(!token) return res.status(401).json({message: "No token"});
+  try {
+    const decoded = jwt.verify(token, process.env.JWT_SECRET);
+    const user = await User.findById(decoded.id).select('-password');
+    res.json(user);
+  } catch(e) { res.status(401).json({message: "Invalid"}); }
+});
+
+app.post('/api/referral/redeem', async (req, res) => {
+  const { userId, code } = req.body;
+  const currentUser = await User.findById(userId);
+  if (currentUser.referred_by || currentUser.referral_code === code) return res.json({ success: false, message: "Invalid" });
+  const referrer = await User.findOne({ referral_code: code });
+  if (!referrer || referrer.referral_count >= 3) return res.json({ success: false, message: "Limit reached/Invalid" });
+  currentUser.referred_by = referrer._id;
+  currentUser.credits += 200;
+  referrer.referral_count += 1;
+  referrer.credits += 200;
+  await currentUser.save();
+  await referrer.save();
+  res.json({ success: true, message: "Success! 200 Credits added." });
+});
+
+const PORT = process.env.PORT || 5000;
+app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
